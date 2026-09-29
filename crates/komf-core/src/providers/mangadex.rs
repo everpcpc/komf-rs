@@ -270,6 +270,8 @@ pub struct MangaDexMetadataMapper {
     artist_roles: Vec<AuthorRole>,
     cover_languages: Vec<String>,
     links_filter: Vec<crate::config::MangaDexLink>,
+    /// 全局 postProcessing.seriesTitleLanguage 联动：搜索/写入时按该语言选主标题（仅显示，不参与匹配）
+    series_title_language: Option<String>,
 }
 
 impl MangaDexMetadataMapper {
@@ -281,6 +283,7 @@ impl MangaDexMetadataMapper {
         artist_roles: Vec<AuthorRole>,
         cover_languages: Vec<String>,
         links_filter: Vec<crate::config::MangaDexLink>,
+        series_title_language: Option<String>,
     ) -> Self {
         Self {
             series_metadata_config,
@@ -289,6 +292,7 @@ impl MangaDexMetadataMapper {
             artist_roles,
             cover_languages,
             links_filter,
+            series_title_language,
         }
     }
 
@@ -300,8 +304,12 @@ impl MangaDexMetadataMapper {
     ) -> ProviderSeriesMetadata {
         let cfg = &self.series_metadata_config;
 
-        let (primary_title, title_type, language) =
-            pick_title(&manga.attributes.title, &manga.attributes.alt_titles);
+        // 写入侧不干涉标题语言：postProcessing.seriesTitleLanguage 由后处理阶段应用。
+        let (primary_title, title_type, language) = pick_title(
+            &manga.attributes.title,
+            &manga.attributes.alt_titles,
+            None,
+        );
         let title = SeriesTitle {
             name: primary_title.clone(),
             r#type: title_type,
@@ -483,7 +491,11 @@ impl MangaDexMetadataMapper {
     }
 
     pub fn to_series_search_result(&self, manga: &MangaDexManga) -> SeriesSearchResult {
-        let (title, _, _) = pick_title(&manga.attributes.title, &manga.attributes.alt_titles);
+        let (title, _, _) = pick_title(
+            &manga.attributes.title,
+            &manga.attributes.alt_titles,
+            self.series_title_language.as_deref(),
+        );
         let image_url = manga
             .relationships
             .iter()
@@ -511,8 +523,26 @@ impl MangaDexMetadataMapper {
 
 fn pick_title(
     title: &std::collections::HashMap<String, String>,
-    _alt_titles: &[std::collections::HashMap<String, String>],
+    alt_titles: &[std::collections::HashMap<String, String>],
+    preference: Option<&str>,
 ) -> (String, Option<TitleType>, Option<String>) {
+    // 标题语言偏好：主 title map 命中则直接采用；miss 再查 alt_titles（同为已返回的本地数据）；
+    // 都未命中回落原有 en→ja→ja-ro→其他。仅影响显示/写入，不参与匹配。
+    if let Some(pref) = preference {
+        let pref_type = if pref == "ja" {
+            TitleType::Native
+        } else {
+            TitleType::Localized
+        };
+        if let Some(name) = title.get(pref) {
+            return (name.clone(), Some(pref_type), Some(pref.to_string()));
+        }
+        for alt in alt_titles {
+            if let Some(name) = alt.get(pref) {
+                return (name.clone(), Some(pref_type), Some(pref.to_string()));
+            }
+        }
+    }
     if let Some(en) = title.get("en") {
         (
             en.clone(),
@@ -710,6 +740,7 @@ pub fn create_provider(
     config: &MangaDexConfig,
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
+    series_title_language: Option<String>,
 ) -> Option<MangaDexMetadataProvider> {
     if !config.enabled {
         return None;
@@ -724,6 +755,7 @@ pub fn create_provider(
             config.artist_roles.clone(),
             config.cover_languages.clone(),
             config.links.clone(),
+            series_title_language,
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
@@ -861,5 +893,55 @@ impl MetadataProvider for MangaDexMetadataProvider {
             self.metadata_mapper
                 .to_series_metadata(&manga, thumbnail, &covers),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_title;
+    use std::collections::HashMap;
+
+    fn title_map(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn pick_title_preference_hit() {
+        let t = title_map(&[("en", "Berserk"), ("ja", "ベルセルク"), ("zh", "剑风传奇")]);
+        let (name, ttype, lang) = pick_title(&t, &[], Some("zh"));
+        assert_eq!(name, "剑风传奇");
+        assert_eq!(lang.as_deref(), Some("zh"));
+        assert_eq!(ttype.map(|x| format!("{x:?}")), Some("Localized".to_string()));
+    }
+
+    #[test]
+    fn pick_title_preference_ja_native() {
+        let t = title_map(&[("en", "Berserk"), ("ja", "ベルセルク")]);
+        let (name, ttype, _) = pick_title(&t, &[], Some("ja"));
+        assert_eq!(name, "ベルセルク");
+        assert_eq!(ttype.map(|x| format!("{x:?}")), Some("Native".to_string()));
+    }
+
+    #[test]
+    fn pick_title_preference_miss_falls_back_to_en() {
+        let t = title_map(&[("en", "Berserk"), ("ja", "ベルセルク")]);
+        let (name, _, _) = pick_title(&t, &[], Some("ko"));
+        assert_eq!(name, "Berserk");
+    }
+
+    #[test]
+    fn pick_title_preference_hits_alt_titles() {
+        let t = title_map(&[("en", "Berserk")]);
+        let alts = vec![title_map(&[("ja", "ベルセルク"), ("zh", "剑风传奇")])];
+        let (name, _, lang) = pick_title(&t, &alts, Some("zh"));
+        assert_eq!(name, "剑风传奇");
+        assert_eq!(lang.as_deref(), Some("zh"));
+    }
+
+    #[test]
+    fn pick_title_no_preference_keeps_legacy() {
+        let t = title_map(&[("ja-ro", "Berserk (JP)"), ("en", "Berserk")]);
+        let (name, _, _) = pick_title(&t, &[], None);
+        assert_eq!(name, "Berserk");
     }
 }

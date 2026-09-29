@@ -69,6 +69,7 @@ async fn main() {
             },
             matcher,
             &http,
+            None,
         );
         run(&p, "MangaDex").await;
     }
@@ -150,6 +151,7 @@ async fn main() {
             },
             matcher,
             &http,
+            None,
             None,
         );
         run(&p, "MangaBaka(API)").await;

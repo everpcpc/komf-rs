@@ -530,6 +530,8 @@ pub struct MangaBakaMetadataMapper {
     pub metadata_config: SeriesMetadataConfig,
     pub author_roles: Vec<crate::model::AuthorRole>,
     pub artist_roles: Vec<crate::model::AuthorRole>,
+    /// 全局 postProcessing.seriesTitleLanguage 联动：搜索/写入时按该语言选主标题（仅显示，不参与匹配）
+    pub series_title_language: Option<String>,
 }
 
 impl MangaBakaMetadataMapper {
@@ -537,11 +539,13 @@ impl MangaBakaMetadataMapper {
         metadata_config: SeriesMetadataConfig,
         author_roles: Vec<crate::model::AuthorRole>,
         artist_roles: Vec<crate::model::AuthorRole>,
+        series_title_language: Option<String>,
     ) -> Self {
         Self {
             metadata_config,
             author_roles,
             artist_roles,
+            series_title_language,
         }
     }
 
@@ -583,6 +587,7 @@ impl MangaBakaMetadataMapper {
                 }
             })
             .collect();
+        // 写入侧不干涉标题语言：postProcessing.seriesTitleLanguage 由后处理阶段应用。
         let title_field = cfg.title.then(|| {
             titles.first().cloned().unwrap_or_else(|| SeriesTitle {
                 name: String::new(),
@@ -845,7 +850,7 @@ impl MangaBakaMetadataMapper {
         SeriesSearchResult {
             url: Some(format!("https://mangabaka.org/{}", series.id)),
             image_url: series.cover.x350.as_ref().and_then(|c| c.x1.clone()),
-            title: primary_title(series),
+            title: primary_title(series, self.series_title_language.as_deref()),
             provider: CoreProviders::MangaBaka.as_str().to_string(),
             result_id: series.id.to_string(),
             media_type: None,
@@ -856,11 +861,20 @@ impl MangaBakaMetadataMapper {
 }
 
 /// 主标题 —— 对应 Kotlin `getPrimaryTitle`。
-fn primary_title(series: &MangaBakaSeriesDto) -> String {
+fn primary_title(series: &MangaBakaSeriesDto, preference: Option<&str>) -> String {
     let titles = match &series.titles {
         Some(titles) => titles,
         None => return String::new(),
     };
+    // 标题语言偏好：命中偏好语言（前缀匹配，排除 -Latn 罗马音变体）；未命中回落 native→primary_en→first。
+    if let Some(pref) = preference {
+        if let Some(t) = titles
+            .iter()
+            .find(|t| t.language.starts_with(pref) && !t.language.ends_with("-Latn"))
+        {
+            return t.title.clone();
+        }
+    }
     if let Some(native) = titles
         .iter()
         .find(|t| t.traits.iter().any(|x| x == "native"))
@@ -1115,6 +1129,7 @@ pub fn create_provider(
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
     database_file: Option<&std::path::Path>,
+    series_title_language: Option<String>,
 ) -> Option<MangaBakaMetadataProvider> {
     if !config.enabled {
         return None;
@@ -1158,6 +1173,7 @@ pub fn create_provider(
             config.series_metadata.clone(),
             config.author_roles.clone(),
             config.artist_roles.clone(),
+            series_title_language,
         ),
         name_matcher,
         cover_fetch_client: config
@@ -2797,7 +2813,9 @@ mod tests {
             ]),
             source: MangaBakaSourceDto::default(),
         };
-        assert_eq!(primary_title(&series), "日本語");
+        assert_eq!(primary_title(&series, None), "日本語");
+        assert_eq!(primary_title(&series, Some("en")), "English Title");
+        assert_eq!(primary_title(&series, Some("zh")), "日本語");
     }
 
     #[test]
@@ -2841,7 +2859,7 @@ mod tests {
                 .as_deref(),
             Some("abc")
         );
-        assert_eq!(primary_title(&series), "Test");
+        assert_eq!(primary_title(&series, None), "Test");
     }
 
     /// 真实 SQLite 回环：komga_series 关联（link/unlink/find/find_all_linked）

@@ -303,7 +303,7 @@ impl ProvidersModule {
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
     ) -> Self {
-        Self::with_oauth(config, http_client, database_work_dir, None)
+        Self::with_oauth(config, http_client, database_work_dir, None, None)
     }
 
     /// 带 OAuth 的构造：`oauth_manager` 由 app 层创建（共享 http client 与 work_dir）。
@@ -312,6 +312,7 @@ impl ProvidersModule {
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
         oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
+        series_title_language: Option<String>,
     ) -> Self {
         let default_name_matcher = config.name_matching_mode;
 
@@ -322,6 +323,7 @@ impl ProvidersModule {
             &http_client,
             database_work_dir,
             oauth_manager.clone(),
+            series_title_language.clone(),
         );
         let library_providers = config
             .library_providers
@@ -336,6 +338,7 @@ impl ProvidersModule {
                         &http_client,
                         database_work_dir,
                         oauth_manager.clone(),
+                        series_title_language.clone(),
                     ),
                 )
             })
@@ -356,6 +359,7 @@ fn create_metadata_providers(
     http_client: &reqwest::Client,
     database_work_dir: Option<&std::path::Path>,
     oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
+    series_title_language: Option<String>,
 ) -> MetadataProvidersContainer {
     let mut providers: Vec<RegisteredProvider> = Vec::new();
 
@@ -394,8 +398,12 @@ fn create_metadata_providers(
             priority: config.ani_list.priority,
         });
     }
-    if let Some(p) = mangadex::create_provider(&config.manga_dex, default_name_matcher, http_client)
-    {
+    if let Some(p) = mangadex::create_provider(
+        &config.manga_dex,
+        default_name_matcher,
+        http_client,
+        series_title_language.clone(),
+    ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
             priority: config.manga_dex.priority,
@@ -435,6 +443,7 @@ fn create_metadata_providers(
         default_name_matcher,
         http_client,
         manga_baka_db.as_deref(),
+        series_title_language.clone(),
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),

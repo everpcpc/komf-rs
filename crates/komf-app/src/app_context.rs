@@ -89,11 +89,20 @@ fn build_state(
     let work_dir = work_dir_from(config_path);
     let db_work_dir = work_dir.join("mangabaka");
 
+    // MangaDex/MangaBaka 标题语言偏好复用全局 postProcessing.seriesTitleLanguage
+    let series_title_language = config
+        .komga
+        .metadata_update
+        .default
+        .post_processing
+        .series_title_language
+        .clone();
     let providers_module = ProvidersModule::with_oauth(
         &config.metadata_providers,
         http_client.clone(),
         Some(&work_dir),
         Some(oauth_manager.clone()),
+        series_title_language,
     );
     let notifications_module = NotificationsModule::new(&config.notifications, http_client.clone());
     let media_server_module = MediaServerModule::new(
